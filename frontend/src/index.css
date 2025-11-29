@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+/* Optional: smooth scrolling for the whole app */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background-color: #f8fafc; /* Matches bg-slate-50 */
+}

@@ -1,0 +1,51 @@
+############################
+# General
+############################
+.DS_Store
+*.log
+*.tmp
+*.swp
+*.swo
+
+############################
+# Python / Backend
+############################
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Python coverage / reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+############################
+# Node / Frontend
+############################
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.turbo/
+
+############################
+# Environment & Secrets
+############################
+.env
+.env.*
+!.env.example
+
+############################
+# Docker
+############################
+*.pid
+docker-volume/
+
+
