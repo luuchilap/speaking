@@ -2,14 +2,17 @@ import numpy as np
 import librosa
 import parselmouth 
 import whisper
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Response, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List, Optional, Dict
 import os
 import shutil
 import subprocess
 import json
 from openai import OpenAI
+from io import BytesIO
+import uuid
 
 app = FastAPI()
 
@@ -70,6 +73,37 @@ class AnalysisResult(BaseModel):
     pronunciation: dict
     vocabulary: dict
     grammar: dict
+
+# --- Conversation Models ---
+class ConversationMessage(BaseModel):
+    role: str  # "assistant" or "user"
+    content: str
+    audio_url: Optional[str] = None  # URL to audio for assistant messages
+
+class ConversationRequest(BaseModel):
+    topic: Optional[str] = None
+    conversation_id: Optional[str] = None
+    conversation_history: List[ConversationMessage] = []
+    user_response: Optional[str] = None  # Transcript of user's latest response
+
+class ConversationResponse(BaseModel):
+    message: str
+    audio_url: str
+    conversation_id: Optional[str] = None
+
+class TranscribeRequest(BaseModel):
+    conversation_id: Optional[str] = None
+
+# In-memory conversation storage (in production, use a database)
+conversations: Dict[str, List[ConversationMessage]] = {}
+IELTS_TOPICS = [
+    "Music", "Sports", "Travel", "Food", "Hobbies", "Work", "Education",
+    "Family", "Technology", "Art", "Books", "Nature", "Shopping", "Health"
+]
+
+# Ensure temp directory exists for audio files
+TEMP_AUDIO_DIR = "/tmp"
+os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
 
 def analyze_intonation(audio_path):
     sound = parselmouth.Sound(audio_path)
@@ -314,6 +348,234 @@ async def analyze_audio(file: UploadFile = File(...)):
         }
     finally:
         # Cleanup
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+        if os.path.exists(temp_wav_filename):
+            os.remove(temp_wav_filename)
+
+# --- Conversation & TTS Endpoints ---
+
+@app.post("/conversation/start")
+async def start_conversation(request: ConversationRequest):
+    """Start a new IELTS conversation on a given topic"""
+    conversation_id = str(uuid.uuid4())
+    topic = request.topic or "General"
+    
+    if not openai_client:
+        return {
+            "message": "Hello! Let's begin our IELTS speaking practice. What would you like to talk about?",
+            "audio_url": None,
+            "conversation_id": conversation_id
+        }
+    
+    # Generate initial question based on topic
+    system_prompt = f"""You are an IELTS examiner conducting Part 1 of the speaking test. 
+    Start a natural, friendly conversation about {topic}. 
+    Ask one clear, open-ended question that encourages the candidate to speak for 1-2 minutes.
+    Keep your question concise (1-2 sentences). Be conversational and warm."""
+    
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Start a conversation about {topic}."}
+            ],
+            temperature=0.7,
+            max_tokens=100
+        )
+        
+        initial_message = response.choices[0].message.content.strip()
+        
+        # Generate TTS audio
+        audio_response = openai_client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",  # Options: alloy, echo, fable, onyx, nova, shimmer
+            input=initial_message
+        )
+        
+        # Save audio to temporary file
+        audio_filename = f"tts_{conversation_id}.mp3"
+        audio_path = f"/tmp/{audio_filename}"
+        # stream_to_file expects a file path string, not a file object
+        audio_response.stream_to_file(audio_path)
+        
+        # Store conversation
+        conversations[conversation_id] = [
+            ConversationMessage(role="assistant", content=initial_message, audio_url=f"/audio/{audio_filename}")
+        ]
+        
+        return {
+            "message": initial_message,
+            "audio_url": f"/audio/{audio_filename}",
+            "conversation_id": conversation_id
+        }
+    except Exception as e:
+        print(f"Error starting conversation: {e}")
+        fallback_message = f"Let's talk about {topic}. Can you tell me about your experience with it?"
+        return {
+            "message": fallback_message,
+            "audio_url": None,
+            "conversation_id": conversation_id
+        }
+
+@app.post("/conversation/respond")
+async def respond_in_conversation(request: ConversationRequest):
+    """Continue the conversation with AI response based on user's input"""
+    conversation_id = request.conversation_id or str(uuid.uuid4())
+    
+    if not openai_client:
+        return {
+            "message": "That's interesting! Can you tell me more?",
+            "audio_url": None,
+            "conversation_id": conversation_id
+        }
+    
+    # Get conversation history
+    history = conversations.get(conversation_id, [])
+    
+    # Add user's latest response to history
+    if request.user_response:
+        history.append(ConversationMessage(role="user", content=request.user_response))
+    
+    # Generate AI response based on conversation context
+    system_prompt = """You are an IELTS examiner conducting Part 1 of the speaking test.
+    You are having a natural, friendly conversation with a candidate. 
+    Based on what they said, ask a follow-up question or make a comment that encourages them to continue speaking.
+    Keep your response conversational, brief (1-2 sentences), and relevant to what they mentioned.
+    Your goal is to keep the conversation flowing naturally while assessing their speaking ability."""
+    
+    try:
+        messages_for_ai = [{"role": "system", "content": system_prompt}]
+        for msg in history[-6:]:  # Keep last 6 messages for context
+            messages_for_ai.append({"role": msg.role, "content": msg.content})
+        
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages_for_ai,
+            temperature=0.7,
+            max_tokens=100
+        )
+        
+        ai_message = response.choices[0].message.content.strip()
+        
+        # Generate TTS audio
+        audio_response = openai_client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=ai_message
+        )
+        
+        # Save audio
+        audio_filename = f"tts_{conversation_id}_{len(history)}.mp3"
+        audio_path = f"/tmp/{audio_filename}"
+        # stream_to_file expects a file path string, not a file object
+        audio_response.stream_to_file(audio_path)
+        
+        # Update conversation history
+        ai_msg_obj = ConversationMessage(
+            role="assistant", 
+            content=ai_message, 
+            audio_url=f"/audio/{audio_filename}"
+        )
+        history.append(ai_msg_obj)
+        conversations[conversation_id] = history
+        
+        return {
+            "message": ai_message,
+            "audio_url": f"/audio/{audio_filename}",
+            "conversation_id": conversation_id
+        }
+    except Exception as e:
+        print(f"Error responding in conversation: {e}")
+        fallback_message = "That's interesting! Can you elaborate on that?"
+        return {
+            "message": fallback_message,
+            "audio_url": None,
+            "conversation_id": conversation_id
+        }
+
+@app.post("/conversation/transcribe")
+async def transcribe_user_audio(file: UploadFile = File(...), conversation_id: Optional[str] = Form(None)):
+    """Transcribe user's audio for conversation flow"""
+    temp_filename = f"temp_transcribe_{file.filename}"
+    
+    try:
+        with open(temp_filename, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        result = model.transcribe(temp_filename)
+        transcript = result["text"].strip()
+        
+        # Update conversation history with user's transcript
+        if conversation_id and conversation_id in conversations:
+            conversations[conversation_id].append(
+                ConversationMessage(role="user", content=transcript)
+            )
+        
+        return {
+            "transcript": transcript,
+            "conversation_id": conversation_id
+        }
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+
+@app.get("/audio/{filename}")
+async def get_audio(filename: str):
+    """Serve generated TTS audio files"""
+    audio_path = f"/tmp/{filename}"
+    if os.path.exists(audio_path):
+        with open(audio_path, "rb") as f:
+            audio_data = f.read()
+        return Response(content=audio_data, media_type="audio/mpeg")
+    else:
+        return Response(content="Audio not found", status_code=404)
+
+@app.get("/conversation/topics")
+async def get_topics():
+    """Get list of available IELTS conversation topics"""
+    return {"topics": IELTS_TOPICS}
+
+@app.post("/conversation/analyze-turn")
+async def analyze_conversation_turn(file: UploadFile = File(...), conversation_id: Optional[str] = Form(None)):
+    """Analyze a single turn in the conversation (for real-time feedback)"""
+    temp_filename = f"temp_{file.filename}"
+    temp_wav_filename = "temp_audio.wav"
+    
+    with open(temp_filename, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    try:
+        # Convert to WAV if needed
+        if not temp_filename.lower().endswith('.wav'):
+            if not convert_to_wav(temp_filename, temp_wav_filename):
+                raise Exception("Failed to convert audio to WAV format")
+            audio_path_for_parselmouth = temp_wav_filename
+        else:
+            audio_path_for_parselmouth = temp_filename
+        
+        # Transcribe
+        result = model.transcribe(temp_filename)
+        transcript = result["text"]
+        word_count = len(transcript.split())
+
+        # Quick analysis (less detailed than full analyze)
+        fluency_stats = analyze_fluency(temp_filename, word_count)
+        pitch_std, pitch_feedback = analyze_intonation(audio_path_for_parselmouth)
+        pronunciation_score = 6.0 + (min(pitch_std, 60) / 20.0)
+        pronunciation_score = min(9.0, pronunciation_score)
+
+        return {
+            "transcript": transcript,
+            "fluency": {
+                "wpm": fluency_stats.get("wpm", 0),
+                "pauses": fluency_stats.get("pauses", 0)
+            },
+            "pronunciation_score": round(pronunciation_score, 1),
+            "feedback": "Continue speaking naturally."
+        }
+    finally:
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
         if os.path.exists(temp_wav_filename):

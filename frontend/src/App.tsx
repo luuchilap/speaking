@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Mic, Square, RefreshCw, BarChart2, Activity, Type, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import ConversationMode from './ConversationMode';
+import ErrorBoundary from './ErrorBoundary';
 
 // --- Real Backend Connection ---
 const getBackendUrl = () => {
@@ -124,6 +126,7 @@ const AudioVisualizer = ({ isRecording }: { isRecording: boolean }) => {
 };
 
 export default function IELTSApp() {
+  const [mode, setMode] = useState<'single' | 'conversation'>('single');
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState<any>(null);
@@ -132,9 +135,9 @@ export default function IELTSApp() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
 
-  // Timer Logic
+  // Timer Logic - Must be called before any conditional returns
   useEffect(() => {
-    if (isRecording) {
+    if (mode === 'single' && isRecording) {
       timerRef.current = setInterval(() => {
         setTimer((prev) => prev + 1);
       }, 1000);
@@ -142,8 +145,9 @@ export default function IELTSApp() {
       clearInterval(timerRef.current);
     }
     return () => clearInterval(timerRef.current);
-  }, [isRecording]);
+  }, [isRecording, mode]);
 
+  // Define all functions before conditional rendering
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -192,8 +196,30 @@ export default function IELTSApp() {
     setIsProcessing(false);
   };
 
+  // Single return with conditional rendering - ensures all hooks are always called
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-20">
+    <>
+      {mode === 'conversation' ? (
+        <ErrorBoundary
+          fallback={
+            <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 max-w-md">
+                <h2 className="text-xl font-bold text-slate-800 mb-4">Error Loading Conversation Mode</h2>
+                <p className="text-slate-600 mb-4">Something went wrong. Please try again.</p>
+                <button
+                  onClick={() => setMode('single')}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                >
+                  Go Back to Single Recording
+                </button>
+              </div>
+            </div>
+          }
+        >
+          <ConversationMode onBack={() => setMode('single')} />
+        </ErrorBoundary>
+      ) : (
+        <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-20">
       <header className="bg-white border-b border-slate-200 py-4 sticky top-0 z-10">
         <div className="max-w-3xl mx-auto px-4 flex justify-between items-center">
           <div className="flex items-center gap-2">
@@ -202,7 +228,15 @@ export default function IELTSApp() {
               IELTS Speaking Coach
             </h1>
           </div>
-          <button className="text-sm font-medium text-slate-500 hover:text-indigo-600">History</button>
+          <div className="flex gap-4 items-center">
+            <button
+              onClick={() => setMode('conversation')}
+              className="text-sm font-medium text-slate-500 hover:text-indigo-600"
+            >
+              Conversation Mode
+            </button>
+            <button className="text-sm font-medium text-slate-500 hover:text-indigo-600">History</button>
+          </div>
         </div>
       </header>
 
@@ -311,5 +345,7 @@ export default function IELTSApp() {
         )}
       </main>
     </div>
+      )}
+    </>
   );
 }
