@@ -94,6 +94,13 @@ class ConversationResponse(BaseModel):
 class TranscribeRequest(BaseModel):
     conversation_id: Optional[str] = None
 
+class Part1QuestionRequest(BaseModel):
+    question_index: int = 0
+
+class Part3QuestionRequest(BaseModel):
+    question_index: int = 0
+    part2_topic: str = ""
+
 # In-memory conversation storage (in production, use a database)
 conversations: Dict[str, List[ConversationMessage]] = {}
 IELTS_TOPICS = [
@@ -705,5 +712,266 @@ async def evaluate_conversation(files: List[UploadFile] = File(...), conversatio
         for temp_wav in temp_wav_files:
             if os.path.exists(temp_wav):
                 os.remove(temp_wav)
+
+# --- IELTS Test Endpoints ---
+
+# Part 1 Questions
+PART1_QUESTIONS = [
+    "What is your full name?",
+    "Where are you from?",
+    "Do you work or study?",
+    "What do you like about your job/studies?",
+    "What do you do in your free time?",
+    "Do you enjoy reading?",
+    "What kind of music do you like?",
+    "Do you prefer watching movies at home or in the cinema?",
+    "How often do you travel?",
+    "What is your favorite season?",
+    "Do you like cooking?",
+    "What sports do you play or watch?",
+    "How do you usually spend your weekends?",
+    "Do you have any hobbies?",
+    "What kind of food do you like?",
+]
+
+@app.post("/ielts/part1/question")
+async def get_part1_question(request: Part1QuestionRequest):
+    """Get a Part 1 question for IELTS speaking test"""
+    question_index = request.question_index
+    
+    if question_index >= len(PART1_QUESTIONS):
+        question_index = question_index % len(PART1_QUESTIONS)
+    
+    question = PART1_QUESTIONS[question_index]
+    
+    # Generate TTS audio if OpenAI is available
+    audio_url = None
+    if openai_client:
+        try:
+            audio_response = openai_client.audio.speech.create(
+                model="tts-1",
+                voice="alloy",
+                input=question
+            )
+            
+            audio_filename = f"part1_q_{question_index}.mp3"
+            audio_path = f"/tmp/{audio_filename}"
+            audio_response.stream_to_file(audio_path)
+            audio_url = f"/audio/{audio_filename}"
+        except Exception as e:
+            print(f"Error generating TTS for Part 1: {e}")
+    
+    return {
+        "question": question,
+        "audio_url": audio_url,
+        "question_index": question_index
+    }
+
+# Part 2 Task Cards
+PART2_TASK_CARDS = [
+    {
+        "topic": "a person who has influenced you",
+        "description": "Describe a person who has had a significant influence on your life.",
+        "points": [
+            "who this person is",
+            "how you know them",
+            "what they have done that influenced you",
+            "and explain why this person is important to you"
+        ]
+    },
+    {
+        "topic": "a place you would like to visit",
+        "description": "Describe a place you would like to visit in the future.",
+        "points": [
+            "where this place is",
+            "what you know about it",
+            "what you would like to do there",
+            "and explain why you would like to visit this place"
+        ]
+    },
+    {
+        "topic": "an important event in your life",
+        "description": "Describe an important event that happened in your life.",
+        "points": [
+            "when and where it happened",
+            "what happened",
+            "who was involved",
+            "and explain why this event was important to you"
+        ]
+    },
+    {
+        "topic": "a book you have read",
+        "description": "Describe a book you have read that you found interesting.",
+        "points": [
+            "what the book is about",
+            "when you read it",
+            "what you learned from it",
+            "and explain why you found it interesting"
+        ]
+    },
+    {
+        "topic": "a memorable journey",
+        "description": "Describe a journey you remember well.",
+        "points": [
+            "where you went",
+            "when you went there",
+            "who you went with",
+            "and explain why this journey was memorable"
+        ]
+    },
+    {
+        "topic": "a skill you would like to learn",
+        "description": "Describe a skill you would like to learn in the future.",
+        "points": [
+            "what the skill is",
+            "why you want to learn it",
+            "how you would learn it",
+            "and explain how this skill would be useful to you"
+        ]
+    },
+    {
+        "topic": "a piece of technology you use",
+        "description": "Describe a piece of technology that you use regularly.",
+        "points": [
+            "what it is",
+            "how often you use it",
+            "what you use it for",
+            "and explain why it is important to you"
+        ]
+    },
+    {
+        "topic": "a hobby you enjoy",
+        "description": "Describe a hobby that you enjoy doing.",
+        "points": [
+            "what the hobby is",
+            "how long you have been doing it",
+            "how often you do it",
+            "and explain why you enjoy this hobby"
+        ]
+    },
+]
+
+@app.post("/ielts/part2/task-card")
+async def get_part2_task_card():
+    """Get a random Part 2 task card for IELTS speaking test"""
+    import random
+    task_card = random.choice(PART2_TASK_CARDS)
+    
+    return {
+        "topic": task_card["topic"],
+        "description": task_card["description"],
+        "points": task_card["points"]
+    }
+
+# Part 3 Discussion Questions (related to Part 2 topics)
+PART3_QUESTIONS_BY_TOPIC = {
+    "a person who has influenced you": [
+        "Do you think role models are important in society?",
+        "How do people influence each other in your culture?",
+        "What qualities make someone a good role model?",
+        "Do you think social media has changed how people influence others?",
+        "How important is it for young people to have mentors?",
+    ],
+    "a place you would like to visit": [
+        "Why do you think people like to travel?",
+        "How has tourism changed in recent years?",
+        "What are the benefits of traveling to different countries?",
+        "Do you think travel is becoming easier or more difficult?",
+        "How does travel affect people's perspectives?",
+    ],
+    "an important event in your life": [
+        "How do people celebrate important events in your country?",
+        "Do you think people remember events better if they are documented?",
+        "How have celebrations changed over time?",
+        "What makes an event memorable?",
+        "Do you think social media has changed how people share events?",
+    ],
+    "a book you have read": [
+        "Do you think reading is still popular in the digital age?",
+        "How has reading changed with technology?",
+        "What are the benefits of reading?",
+        "Do you think e-books will replace physical books?",
+        "How important is reading for education?",
+    ],
+    "a memorable journey": [
+        "How has transportation changed over the years?",
+        "What are the advantages and disadvantages of different modes of transport?",
+        "Do you think people travel more now than in the past?",
+        "How does travel affect the environment?",
+        "What makes a journey enjoyable?",
+    ],
+    "a skill you would like to learn": [
+        "What skills are most important in today's world?",
+        "How do people learn new skills?",
+        "Do you think it's easier to learn skills now than in the past?",
+        "What role does technology play in learning?",
+        "How important is lifelong learning?",
+    ],
+    "a piece of technology you use": [
+        "How has technology changed people's lives?",
+        "Do you think technology makes life easier or more complicated?",
+        "What are the negative effects of technology?",
+        "How do you think technology will change in the future?",
+        "Is it important for everyone to keep up with technology?",
+    ],
+    "a hobby you enjoy": [
+        "Why do you think people have hobbies?",
+        "How have hobbies changed over time?",
+        "Do you think hobbies are important for mental health?",
+        "What hobbies are popular in your country?",
+        "How do hobbies benefit people?",
+    ],
+}
+
+@app.post("/ielts/part3/question")
+async def get_part3_question(request: Part3QuestionRequest):
+    """Get a Part 3 discussion question related to Part 2 topic"""
+    question_index = request.question_index
+    part2_topic = request.part2_topic
+    
+    # Find matching questions for the topic
+    questions = None
+    for topic_key, topic_questions in PART3_QUESTIONS_BY_TOPIC.items():
+        if topic_key.lower() in part2_topic.lower() or part2_topic.lower() in topic_key.lower():
+            questions = topic_questions
+            break
+    
+    # Fallback to general questions if no match
+    if not questions:
+        questions = [
+            "What are your thoughts on this topic?",
+            "How has this changed over time?",
+            "What are the advantages and disadvantages?",
+            "How does this affect people's lives?",
+            "What do you think the future holds for this?",
+        ]
+    
+    if question_index >= len(questions):
+        question_index = question_index % len(questions)
+    
+    question = questions[question_index]
+    
+    # Generate TTS audio if OpenAI is available
+    audio_url = None
+    if openai_client:
+        try:
+            audio_response = openai_client.audio.speech.create(
+                model="tts-1",
+                voice="alloy",
+                input=question
+            )
+            
+            audio_filename = f"part3_q_{question_index}_{hash(part2_topic)}.mp3"
+            audio_path = f"/tmp/{audio_filename}"
+            audio_response.stream_to_file(audio_path)
+            audio_url = f"/audio/{audio_filename}"
+        except Exception as e:
+            print(f"Error generating TTS for Part 3: {e}")
+    
+    return {
+        "question": question,
+        "audio_url": audio_url,
+        "question_index": question_index
+    }
 
 # Run with: uvicorn audio_analysis_service:app --reload --port 8000
