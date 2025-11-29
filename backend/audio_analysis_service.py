@@ -581,4 +581,129 @@ async def analyze_conversation_turn(file: UploadFile = File(...), conversation_i
         if os.path.exists(temp_wav_filename):
             os.remove(temp_wav_filename)
 
+@app.post("/conversation/evaluate", response_model=AnalysisResult)
+async def evaluate_conversation(files: List[UploadFile] = File(...), conversation_id: Optional[str] = Form(None)):
+    """Evaluate entire conversation based on all user audio recordings"""
+    if not files or len(files) == 0:
+        raise ValueError("No audio files provided for evaluation")
+    
+    temp_files = []
+    temp_wav_files = []
+    all_transcripts = []
+    total_word_count = 0
+    all_fluency_scores = []
+    all_pronunciation_scores = []
+    all_pitch_stds = []
+    total_duration = 0.0
+    
+    try:
+        # Process each audio file
+        for idx, file in enumerate(files):
+            temp_filename = f"temp_conv_{idx}_{file.filename}"
+            temp_wav_filename = f"temp_conv_{idx}.wav"
+            temp_files.append(temp_filename)
+            
+            # Save uploaded file
+            with open(temp_filename, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            # Transcribe each file
+            result = model.transcribe(temp_filename)
+            transcript = result["text"].strip()
+            if transcript:
+                all_transcripts.append(transcript)
+                word_count = len(transcript.split())
+                total_word_count += word_count
+                
+                # Analyze fluency for this file
+                fluency_stats = analyze_fluency(temp_filename, word_count)
+                all_fluency_scores.append(fluency_stats['score'])
+                
+                # Get duration for weighted average
+                y, sr = librosa.load(temp_filename)
+                duration = librosa.get_duration(y=y, sr=sr)
+                total_duration += duration
+                
+                # Convert to WAV for pronunciation analysis
+                if not temp_filename.lower().endswith('.wav'):
+                    if convert_to_wav(temp_filename, temp_wav_filename):
+                        temp_wav_files.append(temp_wav_filename)
+                        audio_path_for_parselmouth = temp_wav_filename
+                    else:
+                        audio_path_for_parselmouth = temp_filename
+                else:
+                    audio_path_for_parselmouth = temp_filename
+                
+                # Analyze intonation/pronunciation for this file
+                pitch_std, _ = analyze_intonation(audio_path_for_parselmouth)
+                all_pitch_stds.append(pitch_std)
+                pronunciation_score = 6.0 + (min(pitch_std, 60) / 20.0)
+                pronunciation_score = min(9.0, pronunciation_score)
+                all_pronunciation_scores.append(pronunciation_score)
+        
+        # Combine all transcripts
+        combined_transcript = " ".join(all_transcripts)
+        
+        if not combined_transcript:
+            raise ValueError("No speech detected in any of the audio files")
+        
+        # Calculate average fluency score (weighted by duration if needed, or simple average)
+        avg_fluency_score = sum(all_fluency_scores) / len(all_fluency_scores) if all_fluency_scores else 6.0
+        
+        # Calculate overall WPM across all files
+        overall_wpm = (total_word_count / total_duration * 60) if total_duration > 0 else 0
+        
+        # Calculate average pauses (simplified - in production, count across all files)
+        avg_pauses = sum([analyze_fluency(temp_files[i], len(all_transcripts[i].split()))['pauses'] 
+                          for i in range(len(temp_files)) if i < len(all_transcripts)]) / len(temp_files) if temp_files else 0
+        
+        # Create aggregated fluency stats
+        fluency_stats = {
+            "score": round(avg_fluency_score, 1),
+            "wpm": round(overall_wpm, 1),
+            "pauses": int(round(avg_pauses)),
+            "filled_pauses": 0,
+            "feedback": "Good overall fluency across the conversation." if avg_fluency_score >= 6.5 else "Consider working on smoother transitions and reducing pauses."
+        }
+        
+        # Calculate average pronunciation score
+        avg_pitch_std = sum(all_pitch_stds) / len(all_pitch_stds) if all_pitch_stds else 0
+        avg_pronunciation_score = sum(all_pronunciation_scores) / len(all_pronunciation_scores) if all_pronunciation_scores else 6.0
+        
+        pitch_feedback = "Good intonation range." if avg_pitch_std >= 20 else "Speech is somewhat flat/monotone."
+        if avg_pitch_std > 50:
+            pitch_feedback = "Very expressive intonation."
+        
+        # Analyze vocabulary and grammar using combined transcript
+        vocabulary_stats = await analyze_vocabulary_with_openai(combined_transcript)
+        grammar_stats = await analyze_grammar_with_openai(combined_transcript)
+        
+        # Calculate overall band score
+        overall_band = round(
+            (fluency_stats['score'] + avg_pronunciation_score + vocabulary_stats['score'] + grammar_stats['score']) / 4, 
+            1
+        )
+        
+        return {
+            "overall_band": overall_band,
+            "transcript": combined_transcript,
+            "fluency": fluency_stats,
+            "pronunciation": {
+                "score": round(avg_pronunciation_score, 1),
+                "pitch_variance": round(avg_pitch_std, 1),
+                "stress_accuracy": "Evaluated",
+                "feedback": pitch_feedback
+            },
+            "vocabulary": vocabulary_stats,
+            "grammar": grammar_stats
+        }
+    finally:
+        # Cleanup all temporary files
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        for temp_wav in temp_wav_files:
+            if os.path.exists(temp_wav):
+                os.remove(temp_wav)
+
 # Run with: uvicorn audio_analysis_service:app --reload --port 8000

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Mic, Square, RefreshCw, Volume2, Loader2, MessageSquare } from 'lucide-react';
+import { Mic, Square, RefreshCw, Volume2, Loader2, MessageSquare, StopCircle, BarChart2, Activity, Type, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
 
 const getBackendUrl = () => {
   return import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
@@ -29,11 +29,66 @@ export default function ConversationMode({ onBack }: ConversationModeProps) {
   const [isLoadingTopics, setIsLoadingTopics] = useState(false);
   const [showTopicSelector, setShowTopicSelector] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isEvaluating, setIsEvaluating] = useState(false);
+  const [evaluationResults, setEvaluationResults] = useState<any>(null);
+  const [isConversationStopped, setIsConversationStopped] = useState(false);
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const userAudioBlobsRef = useRef<Blob[]>([]);
+
+  // ScoreCard component for displaying evaluation results
+  const ScoreCard = ({ title, score, details, icon: Icon, color }: any) => {
+    const [expanded, setExpanded] = useState(false);
+
+    const renderDetails = () => {
+      return Object.entries(details).map(([key, value]) => {
+        if (['feedback', 'score'].includes(key)) return null;
+        return (
+          <div key={key} className="bg-white p-3 rounded border border-slate-200">
+            <span className="block text-xs uppercase tracking-wider text-slate-400 mb-1">{key.replace('_', ' ')}</span>
+            <span className="font-medium text-slate-700">{String(value)}</span>
+          </div>
+        );
+      });
+    };
+
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden transition-all duration-300 hover:shadow-md">
+        <div 
+          className="p-5 flex items-center justify-between cursor-pointer"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <div className="flex items-center gap-4">
+            <div className={`p-3 rounded-full ${color} text-white`}>
+              <Icon size={24} />
+            </div>
+            <div>
+              <h3 className="font-semibold text-slate-800">{title}</h3>
+              <p className="text-sm text-slate-500">{details.feedback ? details.feedback.substring(0, 50) + "..." : "No feedback"}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="text-2xl font-bold text-slate-800">{score ? score.toFixed(1) : "-"}</div>
+            {expanded ? <ChevronUp size={20} className="text-slate-400" /> : <ChevronDown size={20} className="text-slate-400" />}
+          </div>
+        </div>
+        
+        {expanded && (
+          <div className="px-5 pb-5 pt-0 bg-slate-50 border-t border-slate-100">
+            <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
+              {renderDetails()}
+            </div>
+            <div className="mt-4 p-3 bg-blue-50 text-blue-800 text-sm rounded border border-blue-100">
+              <strong>Feedback:</strong> {details.feedback}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
@@ -150,6 +205,8 @@ export default function ConversationMode({ onBack }: ConversationModeProps) {
 
       mediaRecorderRef.current.onstop = async () => {
         const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        // Store user audio blob for evaluation
+        userAudioBlobsRef.current.push(blob);
         await processUserAudio(blob);
       };
 
@@ -246,11 +303,72 @@ export default function ConversationMode({ onBack }: ConversationModeProps) {
     }
   };
 
+  const stopConversation = async () => {
+    // Stop any ongoing recording
+    if (isRecording) {
+      stopRecording();
+      // Wait a bit for the recording to finish processing
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    // Stop any playing audio
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    
+    // Check if there are any audio recordings to evaluate
+    if (userAudioBlobsRef.current.length === 0) {
+      alert('No audio recordings found. Please record at least one response before evaluating.');
+      return;
+    }
+    
+    setIsConversationStopped(true);
+    setIsEvaluating(true);
+    
+    try {
+      const backendUrl = getBackendUrl();
+      const formData = new FormData();
+      
+      // Add all user audio blobs
+      userAudioBlobsRef.current.forEach((blob, index) => {
+        formData.append('files', blob, `user_audio_${index}.webm`);
+      });
+      
+      if (conversationId) {
+        formData.append('conversation_id', conversationId);
+      }
+      
+      const response = await fetch(`${backendUrl}/conversation/evaluate`, {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to evaluate conversation: ${errorText}`);
+      }
+      
+      const data = await response.json();
+      setEvaluationResults(data);
+    } catch (error) {
+      console.error('Error evaluating conversation:', error);
+      alert(`Failed to evaluate conversation: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setIsEvaluating(false);
+      setIsConversationStopped(false);
+    } finally {
+      setIsEvaluating(false);
+    }
+  };
+
   const resetConversation = () => {
     setConversationId(null);
     setMessages([]);
     setSelectedTopic(null);
     setShowTopicSelector(true);
+    setEvaluationResults(null);
+    setIsConversationStopped(false);
+    userAudioBlobsRef.current = [];
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
@@ -393,37 +511,104 @@ export default function ConversationMode({ onBack }: ConversationModeProps) {
               )}
             </div>
 
+            {/* Stop Conversation Button */}
+            {!isConversationStopped && messages.length > 0 && (
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-6 text-center">
+                <button
+                  onClick={stopConversation}
+                  disabled={isEvaluating || isRecording}
+                  className="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 mx-auto"
+                >
+                  <StopCircle size={20} />
+                  {isEvaluating ? 'Evaluating...' : 'Stop Conversation & Evaluate'}
+                </button>
+              </div>
+            )}
+
+            {/* Evaluation Results */}
+            {evaluationResults && isConversationStopped && (
+              <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 mb-6">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800">Conversation Evaluation Report</h2>
+                  <div className="flex items-center gap-2 bg-indigo-50 px-4 py-2 rounded-lg border border-indigo-100">
+                    <span className="text-sm text-indigo-800 font-medium">Overall Band</span>
+                    <span className="text-2xl font-bold text-indigo-600">{evaluationResults.overall_band}</span>
+                  </div>
+                </div>
+
+                <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-6">
+                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">Full Transcript</h3>
+                  <p className="text-lg leading-relaxed text-slate-700">
+                    "{evaluationResults.transcript}"
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <ScoreCard 
+                    title="Fluency & Coherence"
+                    score={evaluationResults.fluency.score}
+                    details={evaluationResults.fluency}
+                    icon={Activity}
+                    color="bg-emerald-500"
+                  />
+                  <ScoreCard 
+                    title="Pronunciation"
+                    score={evaluationResults.pronunciation.score}
+                    details={evaluationResults.pronunciation}
+                    icon={BarChart2}
+                    color="bg-blue-500"
+                  />
+                  <ScoreCard 
+                    title="Lexical Resource"
+                    score={evaluationResults.vocabulary.score}
+                    details={evaluationResults.vocabulary}
+                    icon={Type}
+                    color="bg-purple-500"
+                  />
+                  <ScoreCard 
+                    title="Grammar Range"
+                    score={evaluationResults.grammar.score}
+                    details={evaluationResults.grammar}
+                    icon={AlertCircle}
+                    color="bg-amber-500"
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Recording Controls */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 text-center">
-              <div className="flex justify-center gap-4">
-                {!isRecording ? (
-                  <button
-                    onClick={startRecording}
-                    disabled={isProcessing || isPlayingAudio}
-                    className="group relative flex items-center justify-center w-20 h-20 bg-red-500 rounded-full shadow-lg hover:bg-red-600 transition-all hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <Mic size={32} className="text-white" />
-                    <span className="absolute -bottom-8 text-sm font-medium text-slate-500">
-                      {isProcessing ? 'Processing...' : isPlayingAudio ? 'Listening...' : 'Record'}
-                    </span>
-                  </button>
-                ) : (
-                  <button
-                    onClick={stopRecording}
-                    className="group relative flex items-center justify-center w-20 h-20 bg-slate-800 rounded-full shadow-lg hover:bg-slate-900 transition-all hover:scale-105 active:scale-95"
-                  >
-                    <Square size={28} className="text-white fill-current" />
-                    <span className="absolute -bottom-8 text-sm font-medium text-slate-500">Stop</span>
-                  </button>
+            {!isConversationStopped && (
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 text-center">
+                <div className="flex justify-center gap-4">
+                  {!isRecording ? (
+                    <button
+                      onClick={startRecording}
+                      disabled={isProcessing || isPlayingAudio || isEvaluating}
+                      className="group relative flex items-center justify-center w-20 h-20 bg-red-500 rounded-full shadow-lg hover:bg-red-600 transition-all hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Mic size={32} className="text-white" />
+                      <span className="absolute -bottom-8 text-sm font-medium text-slate-500">
+                        {isProcessing ? 'Processing...' : isPlayingAudio ? 'Listening...' : 'Record'}
+                      </span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={stopRecording}
+                      className="group relative flex items-center justify-center w-20 h-20 bg-slate-800 rounded-full shadow-lg hover:bg-slate-900 transition-all hover:scale-105 active:scale-95"
+                    >
+                      <Square size={28} className="text-white fill-current" />
+                      <span className="absolute -bottom-8 text-sm font-medium text-slate-500">Stop</span>
+                    </button>
+                  )}
+                </div>
+                {isRecording && (
+                  <div className="mt-4 flex items-center justify-center gap-2 text-red-500">
+                    <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                    <span className="text-sm font-medium">Recording...</span>
+                  </div>
                 )}
               </div>
-              {isRecording && (
-                <div className="mt-4 flex items-center justify-center gap-2 text-red-500">
-                  <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
-                  <span className="text-sm font-medium">Recording...</span>
-                </div>
-              )}
-            </div>
+            )}
           </>
         )}
       </main>
