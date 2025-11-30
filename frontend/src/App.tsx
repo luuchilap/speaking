@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
-import { Mic, Square, RefreshCw, BarChart2, Activity, Type, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import { Mic, Square, RefreshCw, BarChart2, Activity, Type, AlertCircle, ChevronDown, ChevronUp, Bookmark } from 'lucide-react';
 import ConversationMode from './ConversationMode';
 import IELTSTestMode from './IELTSTestMode';
 import ErrorBoundary from './ErrorBoundary';
+import SaveFeedbackModal from './SaveFeedbackModal';
+import { saveFeedback } from './feedbackStorage';
 
 // --- Real Backend Connection ---
 const getBackendUrl = () => {
@@ -58,8 +60,9 @@ const analyzeAudioWithBackend = async (audioBlob: Blob) => {
 
 // --- Components ---
 
-const ScoreCard = ({ title, score, details, icon: Icon, color }: any) => {
+const ScoreCard = ({ title, score, details, icon: Icon, color, overallBand, transcript, onSave }: any) => {
   const [expanded, setExpanded] = useState(false);
+  const [showSaveModal, setShowSaveModal] = useState(false);
 
   // Helper to safely display details excluding metadata like 'score' and 'feedback'
   const renderDetails = () => {
@@ -74,38 +77,82 @@ const ScoreCard = ({ title, score, details, icon: Icon, color }: any) => {
     });
   };
 
+  const handleSaveClick = (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent card from collapsing
+    setShowSaveModal(true);
+  };
+
+  const handleSave = (note: string) => {
+    if (onSave) {
+      onSave({
+        title,
+        score,
+        details,
+        overallBand,
+        transcript,
+        note,
+      });
+    }
+    setShowSaveModal(false);
+  };
+
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden transition-all duration-300 hover:shadow-md">
-      <div 
-        className="p-5 flex items-center justify-between cursor-pointer"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div className="flex items-center gap-4">
-          <div className={`p-3 rounded-full ${color} text-white`}>
-            <Icon size={24} />
+    <>
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden transition-all duration-300 hover:shadow-md">
+        <div 
+          className="p-5 flex items-center justify-between cursor-pointer"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <div className="flex items-center gap-4">
+            <div className={`p-3 rounded-full ${color} text-white`}>
+              <Icon size={24} />
+            </div>
+            <div>
+              <h3 className="font-semibold text-slate-800">{title}</h3>
+              <p className="text-sm text-slate-500">{details.feedback ? details.feedback.substring(0, 50) + "..." : "No feedback"}</p>
+            </div>
           </div>
-          <div>
-            <h3 className="font-semibold text-slate-800">{title}</h3>
-            <p className="text-sm text-slate-500">{details.feedback ? details.feedback.substring(0, 50) + "..." : "No feedback"}</p>
+          <div className="flex items-center gap-4">
+            <div className="text-2xl font-bold text-slate-800">{score ? score.toFixed(1) : "-"}</div>
+            {expanded ? <ChevronUp size={20} className="text-slate-400" /> : <ChevronDown size={20} className="text-slate-400" />}
           </div>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="text-2xl font-bold text-slate-800">{score ? score.toFixed(1) : "-"}</div>
-          {expanded ? <ChevronUp size={20} className="text-slate-400" /> : <ChevronDown size={20} className="text-slate-400" />}
-        </div>
+        
+        {expanded && (
+          <div className="px-5 pb-5 pt-0 bg-slate-50 border-t border-slate-100">
+            <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
+              {renderDetails()}
+            </div>
+            <div className="mt-4 p-3 bg-blue-50 text-blue-800 text-sm rounded border border-blue-100">
+              <strong>Feedback:</strong> {details.feedback}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={handleSaveClick}
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
+              >
+                <Bookmark size={16} />
+                Save for Review
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       
-      {expanded && (
-        <div className="px-5 pb-5 pt-0 bg-slate-50 border-t border-slate-100">
-          <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
-            {renderDetails()}
-          </div>
-          <div className="mt-4 p-3 bg-blue-50 text-blue-800 text-sm rounded border border-blue-100">
-            <strong>Feedback:</strong> {details.feedback}
-          </div>
-        </div>
-      )}
-    </div>
+      <SaveFeedbackModal
+        isOpen={showSaveModal}
+        onClose={() => setShowSaveModal(false)}
+        onSave={handleSave}
+        feedbackTitle={title}
+        feedbackData={{
+          title,
+          score,
+          details,
+          overallBand,
+          transcript,
+        }}
+      />
+    </>
   );
 };
 
@@ -132,9 +179,31 @@ export default function IELTSApp() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState<any>(null);
   const [timer, setTimer] = useState(0);
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
   const timerRef = useRef<any>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+
+  // Handle saving feedback
+  const handleSaveFeedback = (feedbackData: any) => {
+    try {
+      saveFeedback({
+        note: feedbackData.note || '',
+        feedbackData: {
+          title: feedbackData.title,
+          score: feedbackData.score,
+          details: feedbackData.details,
+          overallBand: feedbackData.overallBand,
+          transcript: feedbackData.transcript,
+        },
+      });
+      setSaveSuccessMessage(`Feedback saved successfully!`);
+      setTimeout(() => setSaveSuccessMessage(null), 3000);
+    } catch (error) {
+      console.error('Error saving feedback:', error);
+      alert('Failed to save feedback. Please try again.');
+    }
+  };
 
   // Timer Logic - Must be called before any conditional returns
   useEffect(() => {
@@ -336,6 +405,9 @@ export default function IELTSApp() {
                 details={results.fluency}
                 icon={Activity}
                 color="bg-emerald-500"
+                overallBand={results.overall_band}
+                transcript={results.transcript}
+                onSave={handleSaveFeedback}
               />
               <ScoreCard 
                 title="Pronunciation"
@@ -343,6 +415,9 @@ export default function IELTSApp() {
                 details={results.pronunciation}
                 icon={BarChart2}
                 color="bg-blue-500"
+                overallBand={results.overall_band}
+                transcript={results.transcript}
+                onSave={handleSaveFeedback}
               />
               <ScoreCard 
                 title="Lexical Resource"
@@ -350,6 +425,9 @@ export default function IELTSApp() {
                 details={results.vocabulary}
                 icon={Type}
                 color="bg-purple-500"
+                overallBand={results.overall_band}
+                transcript={results.transcript}
+                onSave={handleSaveFeedback}
               />
               <ScoreCard 
                 title="Grammar Range"
@@ -357,6 +435,9 @@ export default function IELTSApp() {
                 details={results.grammar}
                 icon={AlertCircle}
                 color="bg-amber-500"
+                overallBand={results.overall_band}
+                transcript={results.transcript}
+                onSave={handleSaveFeedback}
               />
             </div>
 
@@ -367,6 +448,16 @@ export default function IELTSApp() {
               <RefreshCw size={20} />
               Try Another Question
             </button>
+          </div>
+        )}
+        
+        {/* Success Notification */}
+        {saveSuccessMessage && (
+          <div className="fixed bottom-4 right-4 bg-green-500 text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-2 z-50 animate-in slide-in-from-bottom-4">
+            <div className="w-5 h-5 border-2 border-white rounded-full flex items-center justify-center">
+              <span className="text-xs">✓</span>
+            </div>
+            <span className="font-medium">{saveSuccessMessage}</span>
           </div>
         )}
       </main>
